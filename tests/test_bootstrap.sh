@@ -80,6 +80,7 @@ done
 cat > "$G/gh" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$VPCC_TEST_LOG/gh"
+echo "${1:-} ${2:-}: nu=${GH_NO_UPDATE_NOTIFIER:-} pd=${GH_PROMPT_DISABLED:-}" >> "$VPCC_TEST_LOG/gh_env"
 case "$*" in
   "auth status"*) [ -f "$VPCC_TEST_LOG/gh_logged" ] ;;
   "auth login"*) IFS= read -r l; echo "stdin=[$l]" > "$VPCC_TEST_LOG/gh_stdin"; touch "$VPCC_TEST_LOG/gh_logged"; echo "! First copy your one-time code: ABCD-1234" ;;
@@ -113,7 +114,7 @@ mkrel() {
   cat > "$d/install.sh" <<'EOF'
 #!/bin/bash
 { echo "args=[$*]"; echo "VPCC_HOME=$VPCC_HOME"; echo "VPCC_SETUP=$VPCC_SETUP"; echo "VPCC_GH=${VPCC_GH:-}"
-  echo "VPCC_ORG=$VPCC_ORG"; echo "VPCC_BOOTSTRAP=${VPCC_BOOTSTRAP:-}"; echo "real=$(cd "$VPCC_SETUP" && pwd -P)"
+  echo "VPCC_ORG=$VPCC_ORG"; echo "VPCC_BOOTSTRAP=${VPCC_BOOTSTRAP:-}"; echo "GH_NO_UPDATE_NOTIFIER=${GH_NO_UPDATE_NOTIFIER:-}"; echo "real=$(cd "$VPCC_SETUP" && pwd -P)"
   echo "me=$0"; echo "PATH=$PATH"; IFS= read -r l; echo "stdin=[$l]"; } > "$VPCC_TEST_LOG/installer"
 EOF
   if [ -n "$hook" ]; then (cd "$d" && eval "$hook"); fi
@@ -190,6 +191,15 @@ t "installer: link resolves to the release"; has "$(lg installer)" "real=$(cd "$
 t "installer: VPCC_GH"; has "$(lg installer)" "VPCC_GH=$V/bin/gh"
 t "installer: VPCC_ORG + VPCC_BOOTSTRAP"; has "$(lg installer)" "VPCC_ORG=testorg"
 t "installer: ~/.vpcc/bin on PATH"; has "$(lg installer)" "PATH=$V/bin:"
+# Finding 13 of TESTS #66: gh's "new release available" notice is switched off for every gh call;
+# prompts are off for the non-interactive ones only (`gh auth login` must stay interactive).
+t "gh: update notice off on every call"; eq "$(/usr/bin/grep -vc 'nu=1 ' "$L/gh_env")/$(calls gh_env)" "0/$(calls gh)"
+t "gh auth login: prompts left on"; eq "$(/usr/bin/grep '^auth login:' "$L/gh_env")" "auth login: nu=1 pd="
+t "gh auth status: prompts off"; has "$(lg gh_env)" "auth status: nu=1 pd=1"
+t "gh auth setup-git: prompts off"; has "$(lg gh_env)" "auth setup-git: nu=1 pd=1"
+t "gh api: prompts off on every call"; eq "$(/usr/bin/grep '^api ' "$L/gh_env" | /usr/bin/grep -vc 'pd=1$')" 0
+t "  (api was called)"; yes_ /usr/bin/grep -q '^api ' "$L/gh_env"
+t "installer: gh update notice off"; has "$(lg installer)" "GH_NO_UPDATE_NOTIFIER=1"
 t "dscl asked for the real home"; has "$(lg dscl)" ". -read /Users/testuser NFSHomeDirectory"
 t "the unpacked tree is the vpcc repo"; yes_ [ -f "$V/releases/1.0.0/bin/vpcc" ]
 
@@ -545,6 +555,17 @@ t "message"; has "$OUT" "still aren't installed after 3 minutes"
 t "10 waits of 20 s"; eq "$(calls sleep)" 10
 t "a dot per minute"; has "$OUT" "..."
 t "nothing else done"; eq "$(calls gh)" 0
+
+echo "-- README (findings 11 and 12 of TESTS #66)"
+RD="$(cat "$HERE/../README.md")"
+LINE="$(/usr/bin/sed -n "s/^VI_LINE='\(.*\)'\$/\1/p" "$BOOT")"
+t "README: the install line is the bootstrap's own (https)"; has "$RD" "$LINE"
+t "  (that line is https)"; has "$LINE" "curl -fsSL https://"
+t "README: copy the line exactly, with why"; has "$RD" 'Copy the line exactly (copy and paste, don'"'"'t retype it): it must start with `https://`'
+# Observed 11-11 (finding 12 of TESTS #66): a retyped http:// line works (redirect), so the why is "not protected".
+t "  why matches what happens: http works but isn't protected"; has "$RD" "that first request isn't protected, so it can be read or changed on the way"
+t "  no claim that http fetches something else"; hasnt "$RD" 'fetches something else'
+t "README: same window: exec zsh -l"; has "$RD" 'Run `exec zsh -l` there first, or open a new Terminal window.'
 
 printf '%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

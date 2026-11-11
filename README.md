@@ -6,6 +6,8 @@ The one line that installs VPCC on a Mac. This repo is public and holds only `in
 curl -fsSL https://raw.githubusercontent.com/VPCC-System/vpcc-install/main/install.sh | bash
 ```
 
+Copy the line exactly (copy and paste, don't retype it): it must start with `https://`. A plain `http://` line may still work (GitHub redirects it to https), but that first request isn't protected, so it can be read or changed on the way; a typo fetches nothing or another site.
+
 Want to see what it would do first? Add `--dry-run`. It prints every step and downloads or changes nothing:
 
 ```
@@ -28,6 +30,9 @@ Or read the script before running it: open the same URL in a browser, or downloa
 6. **Runs the real installer** from that release (`~/.vpcc/setup/install.sh`). That one shows you its own steps (your accounts file from the VPCC owner, which it finds in Downloads; the Claude accounts, the app, the Dock icons) and asks before changing anything.
 
 Before step 2 it asks once: "Continue? [Y/n]". Add `--yes` to skip that question (`... | bash -s -- --yes`); `--yes` is passed on to the real installer too.
+
+## Right after the install
+In the same Terminal window `vpcc` is "command not found": that window started before VPCC added `~/.local/bin` to PATH (in `~/.zprofile`). Run `exec zsh -l` there first, or open a new Terminal window.
 
 ## Running it again
 Safe. Steps already done are skipped (Command Line Tools, `gh`, the login). If VPCC is already installed, it says "VPCC 1.0.0 is already installed; running its installer to check everything" and runs that installer again; it doesn't download a newer release (use `vpcc update` for that).

@@ -48,10 +48,17 @@ VPCC_SLEEP="${VPCC_SLEEP:-/bin/sleep}"
 VPCC_CLT_POLL="${VPCC_CLT_POLL:-20}"      # seconds between Command Line Tools checks
 VPCC_CLT_MAX="${VPCC_CLT_MAX:-1800}"      # give up after 30 min (assumed: the install takes ~10)
 
+# gh prints "A new release of gh is available" in the middle of our output (Homebrew gh, seen 11-11,
+# finding 13 of TESTS #66): off for every gh call here and in the VPCC installer this runs (exported).
+export GH_NO_UPDATE_NOTIFIER=1
+
 VI_VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
 VI_LINE='curl -fsSL https://raw.githubusercontent.com/VPCC-System/vpcc-install/main/install.sh | bash'
 
 vi_say()  { printf '%s\n' "$*"; }
+# vi_gh <args>: a gh call that must never ask anything (status, setup-git, api). `gh auth login` is
+# the one interactive call and runs without this.
+vi_gh() { GH_PROMPT_DISABLED=1 "$VI_GH" "$@"; }
 vi_step() { printf '\n==> %s\n' "$*"; }
 vi_die()  { printf 'vpcc-install: %s\n' "$*" >&2; vi_cleanup; exit 1; }
 
@@ -253,7 +260,7 @@ vi_login() {
     vi_say "[dry-run] would check the GitHub login (gh auth status), log in in the browser if needed (gh auth login --web), run gh auth setup-git and check access to $VPCC_ORG/vpcc"
     return 0
   fi
-  if "$VI_GH" auth status --hostname github.com >/dev/null 2>&1; then
+  if vi_gh auth status --hostname github.com >/dev/null 2>&1; then
     vi_say "GitHub: already logged in"
   else
     vi_say "Logging in to GitHub: your browser opens. Copy the one-time code shown below, paste it in the browser and approve."
@@ -262,12 +269,12 @@ vi_login() {
     "$VI_GH" auth login --hostname github.com --git-protocol https --web < "$VPCC_TTY" \
       || vi_die "the GitHub login didn't finish. Paste the line again to retry (it skips the steps already done)."
   fi
-  "$VI_GH" auth setup-git --hostname github.com >/dev/null 2>&1 \
+  vi_gh auth setup-git --hostname github.com >/dev/null 2>&1 \
     || vi_die "couldn't connect git to the GitHub login (gh auth setup-git failed). Run \`$VI_GH auth setup-git\` to see why, then paste the line again."
-  err="$("$VI_GH" api "repos/$VPCC_ORG/vpcc" --silent 2>&1 >/dev/null)" && { vi_say "GitHub: access to $VPCC_ORG/vpcc ok"; return 0; }
+  err="$(vi_gh api "repos/$VPCC_ORG/vpcc" --silent 2>&1 >/dev/null)" && { vi_say "GitHub: access to $VPCC_ORG/vpcc ok"; return 0; }
   case "$err" in
     *"HTTP 404"*|*"HTTP 403"*|*"Not Found"*)
-      who="$("$VI_GH" api user --jq .login 2>/dev/null)"
+      who="$(vi_gh api user --jq .login 2>/dev/null)"
       case "$err" in *SAML*|*SSO*)
         vi_die "your GitHub login ${who:+($who) }must be authorized for the $VPCC_ORG organization's single sign-on. Run \`$VI_GH auth refresh --hostname github.com\`, approve $VPCC_ORG in the browser, then paste the line again." ;;
       esac
@@ -287,7 +294,7 @@ vi_get() {
       accept="application/vnd.github.raw"
       case "$url" in */releases/assets/*) accept="application/octet-stream" ;; esac
       # A path, not the full URL: gh api takes both (assumed for full URLs), paths for sure.
-      "$VI_GH" api -H "Accept: $accept" "${url#https://api.github.com/}" > "$out" 2>/dev/null && return 0 ;;
+      vi_gh api -H "Accept: $accept" "${url#https://api.github.com/}" > "$out" 2>/dev/null && return 0 ;;
     https://*)
       "$VPCC_CURL" -fsSL --max-time 600 -o "$out" "$url" 2>/dev/null && return 0 ;;
   esac
