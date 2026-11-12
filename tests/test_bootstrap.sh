@@ -557,6 +557,12 @@ if [ -f "$VPCC_REPO/tools/make-release.sh" ]; then
   (cd "$VPCC_REPO" && /usr/bin/tar -cf - --exclude .git --exclude dist .) | (cd "$MR" && /usr/bin/tar -xf -)
   /usr/bin/jq '.vpcc = "1.3.0"' "$VPCC_REPO/versions.json" > "$MR/versions.json"
   cp "$B/vpcc-1.0.0/install.sh" "$MR/install.sh"
+  # make-release (vpcc 1.0.3, B.2 (3)) builds only the last commit of a clean checkout that is on
+  # origin/main, made with a neutral author: a scratch repo with a local bare "origin" gives it that.
+  MG() { /usr/bin/env -i HOME="$SANDBOX" PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 /usr/bin/git -C "$MR" "$@"; }
+  MG init -q -b main; MG config user.email "alex@example.com"; MG config user.name "Alex"
+  /usr/bin/git init -q --bare -b main "$SANDBOX/mr-origin.git" >/dev/null 2>&1; MG remote add origin "$SANDBOX/mr-origin.git"
+  MG add -A; MG commit -qm "test release"; MG push -q origin main >/dev/null 2>&1
   MROUT="$(/usr/bin/env -i HOME="$SANDBOX" PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="${TMPDIR:-/tmp}" VPCC_ORG=testorg \
     /bin/bash "$MR/tools/make-release.sh" --repo "$MR" --out "$SANDBOX/mr-out" --notes "test" \
     --url https://api.github.com/repos/testorg/vpcc/releases/assets/9 2>&1)"
