@@ -203,18 +203,18 @@ t "installer: gh update notice off"; has "$(lg installer)" "GH_NO_UPDATE_NOTIFIE
 t "dscl asked for the real home"; has "$(lg dscl)" ". -read /Users/testuser NFSHomeDirectory"
 t "the unpacked tree is the vpcc repo"; yes_ [ -f "$V/releases/1.0.0/bin/vpcc" ]
 
-echo "-- --yes and --dry-run pass through"
+echo "-- --yes skips only Continue? (never passed on, C.2); --dry-run passes through"
 fresh; E=(); printf 'n\n' > "$TTYF"
 boot --yes
 t "--yes: no question asked"; hasnt "$OUT" "Continue?"
 t "--yes: installed"; eq "$RC" 0
-t "--yes passed to the installer"; has "$(lg installer)" "args=[--yes]"
+t "--yes NOT passed to the installer (its set-aside question is always asked)"; has "$(lg installer)" "args=[]"
 
 echo "-- re-run with setup already linked"
 boot --yes
 t "already installed message"; has "$OUT" "VPCC 1.0.0 is already installed; running its installer to check everything"
 t "release list not read again"; eq "$(/usr/bin/grep -c 'contents/releases.json' "$L/gh")" 1
-t "installer ran again"; has "$(lg installer)" "args=[--yes]"
+t "installer ran again, still without --yes"; has "$(lg installer)" "args=[]"
 t "link unchanged"; eq "$(readlink "$V/setup")" "releases/1.0.0"
 boot --dry-run
 t "dry-run on an installed Mac runs its installer with --dry-run"; has "$(lg installer)" "args=[--dry-run]"
@@ -227,11 +227,37 @@ t "exit 0"; eq "$RC" 0
 t "tree unchanged"; eq "$(tree)" "$before"
 t "no .vpcc"; no_ [ -e "$V" ]
 t "says dry run"; has "$OUT" "Dry run done: nothing was downloaded or changed."
+t "  says why the full preview didn't run (no gh, no login)"; has "$OUT" "the full preview of what the installer would set aside needs GitHub CLI and a GitHub login first"
 t "would install CLT"; has "$OUT" "[dry-run] would run \`xcode-select --install\`"
 t "no CLT install"; hasnt "$(lg xcode-select)" "--install"
 t "no download"; eq "$(calls curl)$(calls gh)$(calls ditto)$(calls tar)" 0000
 t "no installer"; no_ [ -f "$L/installer" ]
-t "shows the installer call"; has "$OUT" "install.sh' --dry-run --yes"
+t "shows the installer call"; has "$OUT" "install.sh' --dry-run"
+t "  without --yes"; hasnt "$OUT" "--dry-run --yes"
+
+echo "-- C.4: --dry-run on a Mac without VPCC, logged in: the release runs its installer from a temp folder"
+fresh; TD="$SANDBOX/run $N/tmpdir"; mkdir -p "$TD"; touch "$L/gh_logged"
+E=(VPCC_GH="$G/gh" TMPDIR="$TD")
+before="$(tree)"
+boot --dry-run --yes
+t "exit 0"; eq "$RC" 0
+t "access checked read-only"; has "$(lg gh)" "api repos/testorg/vpcc --silent"
+t "  never logs in or runs setup-git"; eq "$(/usr/bin/grep -cE 'auth login|auth setup-git' "$L/gh")" 0
+t "newest good release downloaded"; has "$(lg gh)" "application/octet-stream repos/testorg/vpcc/releases/assets/1"
+t "its installer ran with --dry-run only"; has "$(lg installer)" "args=[--dry-run]"
+t "  from the temp folder, outside ~/.vpcc"; has "$(lg installer)" "VPCC_SETUP=$TD/vpcc-dry."
+t "  VPCC_HOME is the real target"; has "$(lg installer)" "VPCC_HOME=$V"
+t "  reads the terminal"; has "$(lg installer)" "stdin=[y]"
+t "HOME unchanged, no ~/.vpcc"; eq "$(tree)" "$before"
+t "  …"; no_ [ -e "$V" ]
+t "temp folder removed"; eq "$(ls -A "$TD")" ""
+t "says so"; has "$OUT" "Dry run done: nothing was changed (the release was downloaded into a temp folder, checked, and removed)."
+fresh; TD="$SANDBOX/run $N/tmpdir"; mkdir -p "$TD"; touch "$L/gh_logged"
+E=(VPCC_GH="$G/gh" TMPDIR="$TD"); index "$(rel 1.0.0 good 1 1111111111111111111111111111111111111111111111111111111111111111)"
+boot --dry-run
+t "a bad checksum in the dry run: refused"; has "$OUT" "doesn't match its checksum"
+t "  temp folder removed, nothing run"; eq "$(ls -A "$TD")/$([ -f "$L/installer" ] && echo ran)" "/"
+good_index
 
 echo "-- gh zip checksum mismatch stops before unzip"
 fresh; E=(GH_SHA256_ARM64=0000000000000000000000000000000000000000000000000000000000000000)
@@ -555,6 +581,33 @@ t "message"; has "$OUT" "still aren't installed after 3 minutes"
 t "10 waits of 20 s"; eq "$(calls sleep)" 10
 t "a dot per minute"; has "$OUT" "..."
 t "nothing else done"; eq "$(calls gh)" 0
+
+echo "-- 1.0.3 texts (C.1, C.2, PR-13, B.3)"
+RD="$(cat "$HERE/../README.md")"; BS="$(cat "$BOOT")"
+t "README: macOS may ask for the Mac password (C.1)"; has "$RD" "macOS may ask for your Mac password: once for Command Line Tools, once when you drag Claude into Applications."
+t "  no 'No admin password' claim"; hasnt "$RD" "No admin password"
+t "  no 'asks before changing anything' (C.2)"; hasnt "$RD" "asks before changing anything"
+t "  says what --yes does"; has "$RD" '`--yes` skips only that question: it is not passed on'
+t "  no placeholder gh claim (PR-13)"; hasnt "$RD" "placeholders"
+t "  names the gh pin"; has "$RD" "GH_VERSION\` = 2.103.3"
+t "install.sh: no TODO(owner) (PR-13)"; hasnt "$BS" "TODO(owner)"
+t "  --help says what --yes does"; boot --help; has "$OUT" 'skip only the first "Continue?" question'
+t "  no 'No admin rights needed' line (C.1)"; hasnt "$BS" "No admin rights needed"
+GI="$(cat "$HERE/../.gitignore" 2>/dev/null)"
+for p in .DS_Store .claude/ 'accounts*.json' 'vpcc-accounts*.json' '*accounts-master*'; do
+  t ".gitignore: $p (B.3)"; yes_ /usr/bin/grep -qxF "$p" "$HERE/../.gitignore"
+done
+
+# B.3 (1): the leak check refuses an email off the allowlist and a compressed file under tests/.
+LP="$SANDBOX/leakprobe"; mkdir -p "$LP/tests"; echo '{"made_by":"alex@example.com"}' > "$LP/a.json"
+t "leaks.sh: allowlisted emails pass"; yes_ /bin/bash "$HERE/leaks.sh" "$LP"
+printf 'contact: sam@%s\n' company-example.org > "$LP/tests/fixture.json"   # built here, so this file holds no such address
+LO="$(/bin/bash "$HERE/leaks.sh" "$LP" 2>&1)"; LR=$?
+t "leaks.sh: an email off the allowlist fails"; eq "$LR" 1
+t "  names the file, never the address"; eq "$(printf '%s' "$LO" | /usr/bin/grep -c 'tests/fixture.json: email outside the allowlist')/$(printf '%s' "$LO" | /usr/bin/grep -c company-example)" "1/0"
+rm "$LP/tests/fixture.json"; : > "$LP/tests/x.tgz"
+t "leaks.sh: a compressed file under tests/ fails"; no_ /bin/bash "$HERE/leaks.sh" "$LP"
+t "this repo passes the leak check"; yes_ /bin/bash "$HERE/leaks.sh"
 
 echo "-- README (findings 11 and 12 of TESTS #66)"
 RD="$(cat "$HERE/../README.md")"
