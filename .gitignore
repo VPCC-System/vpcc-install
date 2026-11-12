@@ -1,0 +1,6 @@
+# Never committed (DESIGN B.3): Finder files, Claude's local folder, and any accounts file.
+.DS_Store
+.claude/
+accounts*.json
+vpcc-accounts*.json
+*accounts-master*

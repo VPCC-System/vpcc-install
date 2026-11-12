@@ -13,18 +13,22 @@
 #      ~/.vpcc/releases/<version>/ and points the link ~/.vpcc/setup at it
 #   6. runs the real installer from that release: ~/.vpcc/setup/install.sh
 #
-# Options (after `bash -s --`): --dry-run (print the steps; download and change nothing),
-#   --yes (don't ask before starting; passed on to the real installer), --help.
+# Options (after `bash -s --`): --dry-run (change nothing; on a Mac without VPCC it downloads the
+#   newest release into a temp folder outside ~/.vpcc, checks it and runs that release's installer with
+#   --dry-run, so you see every folder it would move with its size, the Keychain logins it would
+#   delete, the cswap uninstall and the shell-file and Dock edits; the temp folder is removed after),
+#   --yes (skips only the first "Continue?" question; it is NOT passed on: the real installer always
+#   asks before it sets an old Claude setup aside), --help.
 #
 # Safety: the whole script is inside main(), called on the last line as `{ main "$@"; }`: a download
 # cut anywhere (even right after "main") is an unfinished command, so bash runs nothing.
-# No admin rights (no sudo). Answers are read from the terminal (/dev/tty), never
+# No sudo; macOS may ask for the Mac password (Command Line Tools; dragging Claude into Applications).
+# Answers are read from the terminal (/dev/tty), never
 # from stdin (stdin is this script). Errors start with "vpcc-install: " and say how to fix them.
 #
 # bash 3.2 + /usr/bin/jq + stock macOS tools. Every outside command goes through a variable so
 # the tests (tests/run.sh) can replace it with a stub.
 
-# TODO(owner): set the real GitHub org before the first push (DESIGN B.2).
 VPCC_ORG="${VPCC_ORG:-VPCC-System}"
 
 # GitHub CLI pinned for the download (only used when gh isn't already installed).
@@ -69,6 +73,10 @@ vi_rm() {
     # give this run's own temp tree write access first (-P: never follow a link out of it).
     "$VPCC_HOME"/releases/.incoming.*|"$VPCC_HOME"/bin/.gh-incoming.*)
       chmod -R -P u+rwX "$1" 2>/dev/null; rm -rf "$1" ;;
+    # The dry run's temp folder (outside ~/.vpcc), only the exact one this run made.
+    */vpcc-dry.*)
+      if [ -n "${VI_DRY_TMP:-}" ] && [ "$1" = "$VI_DRY_TMP" ]; then chmod -R -P u+rwX "$1" 2>/dev/null; rm -rf "$1"
+      else printf 'vpcc-install: refusing to delete %s (not a temp folder of this run)\n' "$1" >&2; fi ;;
     *) printf 'vpcc-install: refusing to delete %s (not a temp folder of this run)\n' "$1" >&2 ;;
   esac
 }
@@ -101,8 +109,13 @@ vi_usage() {
   cat <<EOF
 vpcc-install: installs VPCC on this Mac.
   $VI_LINE
-  ... | bash -s -- --dry-run   print the steps; download and change nothing
-  ... | bash -s -- --yes       don't ask before starting (also passed to the real installer)
+  ... | bash -s -- --dry-run   change nothing: on a Mac without VPCC, the newest release is downloaded
+                               into a temp folder (removed after) and its installer shows every
+                               folder it would move (with sizes), every Keychain login it would delete,
+                               the cswap uninstall and the shell-file and Dock edits
+  ... | bash -s -- --yes       skip only the first "Continue?" question; the real installer still asks
+                               before it sets an old Claude setup aside (folders moved and kept
+                               read-only; old logins removed from the Keychain)
 EOF
 }
 
@@ -257,7 +270,15 @@ vi_gh_install() {
 vi_login() {
   local err who
   if [ "$VI_DRY" = 1 ]; then
-    vi_say "[dry-run] would check the GitHub login (gh auth status), log in in the browser if needed (gh auth login --web), run gh auth setup-git and check access to $VPCC_ORG/vpcc"
+    # Read-only checks only: a dry run never logs in or changes git's settings.
+    VI_DRY_ACCESS=0
+    if [ -n "${VI_GH:-}" ] && vi_gh auth status --hostname github.com >/dev/null 2>&1 &&
+       vi_gh api "repos/$VPCC_ORG/vpcc" --silent >/dev/null 2>&1; then
+      VI_DRY_ACCESS=1
+      vi_say "[dry-run] GitHub: logged in, access to $VPCC_ORG/vpcc ok (would run gh auth setup-git)"
+    else
+      vi_say "[dry-run] would check the GitHub login (gh auth status), log in in the browser if needed (gh auth login --web), run gh auth setup-git and check access to $VPCC_ORG/vpcc"
+    fi
     return 0
   fi
   if vi_gh auth status --hostname github.com >/dev/null 2>&1; then
@@ -362,19 +383,10 @@ vi_verify() {
   return 0
 }
 
-# vi_release: sets VI_V and makes $VPCC_HOME/releases/$VI_V. Nothing is left behind on failure.
-vi_release() {
-  local idx rj url sha rel inc got root n dest
-  rel="$VPCC_HOME/releases"
-  if [ "$VI_DRY" = 1 ]; then
-    if [ -n "${VPCC_INSTALL_SOURCE:-}" ]; then vi_say "[dry-run] would unpack the local release $VPCC_INSTALL_SOURCE into $rel/<version>/"
-    else vi_say "[dry-run] would read the release list of $VPCC_ORG/vpcc, download the newest good release, check its checksum and unpack it into $rel/<version>/"; fi
-    vi_say "[dry-run] would point the link $VPCC_HOME/setup at releases/<version>"
-    return 0
-  fi
-  mkdir -p "$rel" || vi_die "can't create $rel. Check that you own $VPCC_HOME (e.g. ls -ld '$VPCC_HOME')."
-  inc="$(mktemp -d "$rel/.incoming.XXXXXX")" || vi_die "can't create a temp folder in $rel."
-  vi_temp "$inc"
+# vi_fetch <temp folder>: gets the newest good release (or VPCC_INSTALL_SOURCE), checks its checksum,
+# unpacks it inside the temp folder and checks it. Sets VI_V and VI_ROOT (the unpacked release).
+vi_fetch() {
+  local inc="$1" rj url sha got root n
   if [ -n "${VPCC_INSTALL_SOURCE:-}" ]; then
     # A development tarball (tests, a scratch macOS user): no index, no checksum; the latch ran.
     cp "$VPCC_INSTALL_SOURCE" "$inc/release.tgz" 2>/dev/null || vi_die "can't read VPCC_INSTALL_SOURCE ($VPCC_INSTALL_SOURCE)."
@@ -410,17 +422,48 @@ vi_release() {
     vi_valid_version "$VI_V" || vi_die "the local release's versions.json has no valid .vpcc version (e.g. \"1.0.0\"). Nothing was installed."
   fi
   [ -n "$root" ] && vi_verify "$root" "$VI_V" || vi_die "the VPCC $VI_V download failed its check: $VI_WHY. Nothing was installed. Tell the VPCC owner."
+  VI_ROOT="$root"
+}
+
+# vi_release: sets VI_V and makes $VPCC_HOME/releases/$VI_V. Nothing is left behind on failure.
+vi_release() {
+  local rel inc dest
+  rel="$VPCC_HOME/releases"
+  mkdir -p "$rel" || vi_die "can't create $rel. Check that you own $VPCC_HOME (e.g. ls -ld '$VPCC_HOME')."
+  inc="$(mktemp -d "$rel/.incoming.XXXXXX")" || vi_die "can't create a temp folder in $rel."
+  vi_temp "$inc"
+  vi_fetch "$inc"
   dest="$rel/$VI_V"
   if [ -e "$dest" ] || [ -L "$dest" ]; then
     mv "$dest" "$inc/old" || vi_die "can't replace the old $dest; move it away (e.g. mv '$dest' ~/Desktop/) and paste the line again."
   fi
-  mv "$root" "$dest" || vi_die "can't move the release into $dest."
+  mv "$VI_ROOT" "$dest" || vi_die "can't move the release into $dest."
   vi_rm "$inc"
   # The link: relative, swapped in one rename (-h: replace the link itself).
   rm -f "$VPCC_HOME/.setup.new.$$"
   ln -s "releases/$VI_V" "$VPCC_HOME/.setup.new.$$" && mv -fh "$VPCC_HOME/.setup.new.$$" "$VPCC_HOME/setup" \
     || vi_die "can't create the link $VPCC_HOME/setup."
   vi_say "VPCC $VI_V: unpacked into $dest"
+}
+
+# vi_dry_release (C.4 (1)): on a Mac without VPCC, the same download and checks into a temp folder
+# OUTSIDE ~/.vpcc (nothing is written there). Sets VI_ROOT; empty when the full preview can't run (no
+# gh or no GitHub login yet: a dry run never logs in).
+vi_dry_release() {
+  local base="${TMPDIR:-/tmp}"
+  VI_ROOT=""
+  if [ -z "${VPCC_INSTALL_SOURCE:-}" ] && [ "${VI_DRY_ACCESS:-0}" != 1 ]; then
+    vi_say "[dry-run] would read the release list of $VPCC_ORG/vpcc, download the newest good release, check its checksum and unpack it into $VPCC_HOME/releases/<version>/"
+    vi_say "[dry-run] would point the link $VPCC_HOME/setup at releases/<version>"
+    vi_say "[dry-run] (the full preview of what the installer would set aside needs GitHub CLI and a GitHub login first; nothing was downloaded)"
+    return 0
+  fi
+  base="${base%/}"
+  vi_under "$(vi_abs "$base")" "$(vi_abs "$VPCC_HOME")" && base=/tmp
+  VI_DRY_TMP="$(mktemp -d "$base/vpcc-dry.XXXXXX")" || vi_die "can't create a temp folder in $base."
+  vi_temp "$VI_DRY_TMP"
+  vi_fetch "$VI_DRY_TMP"
+  vi_say "[dry-run] VPCC $VI_V: downloaded, checked and unpacked into a temp folder ($VI_DRY_TMP); nothing in $VPCC_HOME"
 }
 
 # ---- what is already there -----------------------------------------------------------------------
@@ -451,6 +494,28 @@ vi_preflight() {
   return 0
 }
 
+# vi_dry_installer: runs the temp release's installer with --dry-run against this Mac (C.4 (1)), then
+# removes the temp folder. Without a temp release (no login yet), it says what it would run.
+vi_dry_installer() {
+  local rc
+  if [ -z "${VI_ROOT:-}" ]; then
+    vi_say "[dry-run] would run: VPCC_HOME='$VPCC_HOME' VPCC_SETUP='$VPCC_HOME/setup' /bin/bash '$VPCC_HOME/setup/install.sh' --dry-run"
+    vi_say "Dry run done: nothing was downloaded or changed."
+    return 0
+  fi
+  vi_say "Running VPCC $VI_V's installer with --dry-run (from the temp folder)"
+  if ( : < "$VPCC_TTY" ) 2>/dev/null; then
+    VPCC_HOME="$VPCC_HOME" VPCC_SETUP="$VI_ROOT" VPCC_ORG="$VPCC_ORG" VPCC_GH="${VI_GH:-}" VPCC_BOOTSTRAP=1 \
+      PATH="$VPCC_HOME/bin:$PATH" /bin/bash "$VI_ROOT/install.sh" --dry-run < "$VPCC_TTY"; rc=$?
+  else
+    VPCC_HOME="$VPCC_HOME" VPCC_SETUP="$VI_ROOT" VPCC_ORG="$VPCC_ORG" VPCC_GH="${VI_GH:-}" VPCC_BOOTSTRAP=1 \
+      PATH="$VPCC_HOME/bin:$PATH" /bin/bash "$VI_ROOT/install.sh" --dry-run < /dev/null; rc=$?
+  fi
+  vi_cleanup
+  vi_say "Dry run done: nothing was changed (the release was downloaded into a temp folder, checked, and removed)."
+  return $rc
+}
+
 main() {
   local a
   VI_DRY=0; VI_YES=0
@@ -479,8 +544,8 @@ main() {
   case "/$VPCC_HOME/" in */../*) vi_die "VPCC_HOME can't contain a \"..\" part (it is \"$VPCC_HOME\"); unset it to use ~/.vpcc, or give the plain path, e.g. VPCC_HOME=\"\$HOME/.vpcc\"." ;; esac
   vi_latch
 
-  vi_say "VPCC installer (bootstrap)$( [ "$VI_DRY" = 1 ] && printf ' - dry run: nothing is downloaded or changed')"
-  vi_say "Installs into $VPCC_HOME. No admin rights needed."
+  vi_say "VPCC installer (bootstrap)$( [ "$VI_DRY" = 1 ] && printf ' - dry run: nothing is changed')"
+  vi_say "Installs into $VPCC_HOME. No sudo; macOS may ask for your Mac password (once for Command Line Tools, once when you drag Claude into Applications)."
   vi_step "1/6 Checking this Mac"
   vi_check_mac
   vi_preflight
@@ -504,17 +569,19 @@ main() {
   vi_step "5/6 VPCC release"
   if [ -n "$VI_INSTALLED" ]; then
     vi_say "Using the installed VPCC $VI_INSTALLED ($VPCC_HOME/setup)."
+  elif [ "$VI_DRY" = 1 ]; then
+    vi_dry_release
   else
     vi_release
   fi
   vi_step "6/6 VPCC installer"
+  # --yes is never passed on (C.2): it skipped only the "Continue?" above. The real installer always
+  # asks before it sets an old Claude setup aside.
   set --
   [ "$VI_DRY" = 1 ] && set -- "$@" --dry-run
-  [ "$VI_YES" = 1 ] && set -- "$@" --yes
   if [ "$VI_DRY" = 1 ] && [ -z "$VI_INSTALLED" ]; then
-    vi_say "[dry-run] would run: VPCC_HOME='$VPCC_HOME' VPCC_SETUP='$VPCC_HOME/setup' /bin/bash '$VPCC_HOME/setup/install.sh' $*"
-    vi_say "Dry run done: nothing was downloaded or changed."
-    return 0
+    vi_dry_installer
+    return $?
   fi
   [ -f "$VPCC_HOME/setup/install.sh" ] || vi_die "$VPCC_HOME/setup/install.sh is missing. Paste the line again."
   vi_say "Running $VPCC_HOME/setup/install.sh $*"
