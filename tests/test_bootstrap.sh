@@ -6,7 +6,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 BOOT="$HERE/../install.sh"
-VPCC_REPO="${VPCC_REPO:-$HOME/Desktop/vpcc}"   # read only: the fake release is built from it
+VPCC_REPO="${VPCC_REPO:-$HOME/Desktop/Projects/VPCC/vpcc}"   # read only: the fake release is built from it
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/vpcc-boot-test.XXXXXX")"
 trap 'chmod -R u+w "$SANDBOX" 2>/dev/null; rm -rf "$SANDBOX"' EXIT
 PASS=0; FAIL=0; TNAME=""
